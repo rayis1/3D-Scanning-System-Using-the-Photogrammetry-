@@ -1,0 +1,97 @@
+import RPi.GPIO as GPIO
+import time
+import os
+from picamera2 import Picamera2
+from datetime import datetime
+import subprocess
+import sys
+STEP1, DIR1 = 17, 18
+STEP2, DIR2 = 23, 24
+LED1, LED2 = 22, 27
+DELAY_US = 1000   # Delay between motor steps in microseconds
+WAIT_TIME = 1     # Delay between 2 motor movement and camera capture
+camera = Picamera2()
+camera.configure(camera.create_still_configuration(main={"size": (4056, 3040)}))
+camera.start()
+GPIO.setmode(GPIO.BCM)
+GPIO.setwarnings(False)
+for pin in [STEP1, DIR1, STEP2, DIR2, LED1, LED2]:
+    GPIO.setup(pin, GPIO.OUT)
+GPIO.output(LED1, GPIO.LOW)
+GPIO.output(LED2, GPIO.LOW)
+
+def wait():
+    time.sleep(WAIT_TIME)
+
+def move_motor(step_pin, dir_pin, enable_led_on, enable_led_off, steps, direction):
+    GPIO.output(dir_pin, GPIO.HIGH if direction == 'forward' else GPIO.LOW)
+    GPIO.output(enable_led_on, GPIO.HIGH)
+    GPIO.output(enable_led_off, GPIO.LOW)
+    for _ in range(steps):
+        GPIO.output(step_pin, GPIO.HIGH)
+        time.sleep(DELAY_US / 1_000_000)
+        GPIO.output(step_pin, GPIO.LOW)
+        time.sleep(DELAY_US / 1_000_000)
+    GPIO.output(enable_led_on, GPIO.LOW)
+
+def capture_photo(path):
+    camera.capture_file(path)
+    print(f"Saved: {path}")
+
+def transfer_photos(photo_dir, targets):
+    for pc_ip, pc_user in targets:
+        target_path = f"{pc_user}@{pc_ip}:~/raspberry_photos"
+        scp_command = ["scp", "-r", photo_dir, f"{pc_user}@{pc_ip}:{target_path}"]
+        print(f"Transferring photos to {pc_ip} with: {' '.join(scp_command)}")
+        subprocess.run(scp_command)
+
+def main():
+    horizontal = int(input("Enter number of horizontal images per level: "))
+    vertical = int(input("Enter number of vertical levels: "))
+
+    photo_dir = f"/home/pi/Desktop/photos/{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+    os.makedirs(photo_dir, exist_ok=True)
+
+    motor1_steps_per_rotation = 200  # Steps required for motor 1 to make one full turn
+    motor2_steps_total = 1200        # Steps required for motor 2 to make one full turn
+    motor1_steps = motor1_steps_per_rotation // horizontal
+    motor2_steps = motor2_steps_total // vertical
+
+    for v in range(1, vertical + 1):
+        move_motor(STEP2, DIR2, LED2, LED1, motor2_steps, 'forward')
+        wait()
+
+        for h in range(1, horizontal + 1):
+            filename = os.path.join(photo_dir, f"v{v}_h{h}.jpg")
+            capture_photo(filename)
+            wait()
+            if h != horizontal:
+                move_motor(STEP1, DIR1, LED1, LED2, motor1_steps, 'forward')
+                wait()
+
+       move_motor(STEP1, DIR1, LED1, LED2, motor1_steps * (horizontal - 1), 'backward')
+
+    move_motor(STEP2, DIR2, LED2, LED1, motor2_steps * vertical, 'backward')
+
+    camera.stop()
+    GPIO.cleanup()
+
+    targets = [
+        ("IP_ADDRESS_1", "User_Name_1"),
+        ("IP_ADDRESS_2", "User_Name_2")
+    ]
+    transfer_photos(photo_dir, targets)
+    print("Done! Photos transferred to all targets.")
+
+try:
+    main()
+except KeyboardInterrupt:
+    print("Interrupted by user.")
+    camera.stop()
+    GPIO.cleanup()
+    sys.exit(0)
+except Exception as e:
+    print(f"An error occurred: {e}")
+    camera.stop()
+    GPIO.cleanup()
+    sys.exit(1)
